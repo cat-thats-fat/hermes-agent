@@ -29,7 +29,7 @@ import {
   openFindBar
 } from '@/store/find-in-page'
 import { toggleHud } from '@/store/hud'
-import { $capture, $comboIndex, endCapture, setBinding } from '@/store/keybinds'
+import { $capture, $comboIndex, $dictateMode, endCapture, setBinding } from '@/store/keybinds'
 import {
   requestSessionSearchFocus,
   setFileBrowserOpen,
@@ -65,7 +65,12 @@ import { toggleStatusbarVisible } from '@/store/statusbar-prefs'
 import { openNewWindow } from '@/store/windows'
 import { useTheme } from '@/themes/context'
 
-import { requestComposerFocus, requestModelMenuToggle, requestVoiceToggle } from '../chat/composer/focus'
+import {
+  requestComposerDictate,
+  requestComposerFocus,
+  requestModelMenuToggle,
+  requestVoiceToggle
+} from '../chat/composer/focus'
 import { handleComposerFocusChord } from '../chat/composer/focus-chord'
 import { handleWindowPaste } from '../chat/composer/paste-to-focus'
 import { openSession } from '../open-session'
@@ -109,6 +114,10 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
   // Keep the latest closures without re-subscribing the listener.
   const handlersRef = useRef<HandlerMap>({})
   const commitSwitcherRef = useRef<() => void>(() => {})
+  // The physical key that started a hold. Keyup must match this rather than
+  // re-matching a combo because modifier keyup changes the combo mid-gesture.
+  const heldDictateCodeRef = useRef<string | null>(null)
+  const toggleDictateActiveRef = useRef(false)
 
   const profileSwitchHandlers: HandlerMap = {}
 
@@ -318,6 +327,9 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     []
   )
 
+  // This listener needs an event-local hold identity across keydown/keyup; it
+  // is intentionally a ref rather than render state (no paint belongs here).
+  // eslint-disable-next-line no-restricted-syntax
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       // An active IME composition owns the keyboard. Windows Chinese IMEs
@@ -366,6 +378,18 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
         return
       }
 
+      // Escape is a cancel gesture only while this dispatcher initiated a
+      // dictation recording. It discards audio (unlike keyup/blur, which
+      // transcribe) and otherwise leaves normal composer Escape untouched.
+      if (event.key === 'Escape' && (heldDictateCodeRef.current || toggleDictateActiveRef.current)) {
+        event.preventDefault()
+        heldDictateCodeRef.current = null
+        toggleDictateActiveRef.current = false
+        requestComposerDictate('cancel')
+
+        return
+      }
+
       const combo = comboFromEvent(event)
 
       if (!combo) {
@@ -400,6 +424,28 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
         return
       }
 
+      if (actionId === 'composer.dictate') {
+        // OS key-repeat must never create another MediaRecorder or flip toggle
+        // mode back off while the key is held.
+        if (event.repeat) {
+          event.preventDefault()
+
+          return
+        }
+
+        event.preventDefault()
+
+        if ($dictateMode.get() === 'hold') {
+          heldDictateCodeRef.current = event.code
+          requestComposerDictate('start')
+        } else {
+          toggleDictateActiveRef.current = !toggleDictateActiveRef.current
+          requestComposerDictate('toggle')
+        }
+
+        return
+      }
+
       // Soft `/` / Enter: gated so dialogs/buttons/terminal keep those keys.
       // Rebound chords fall through to the normal handler.
       if (actionId === 'composer.focus' && isComposerFocusSoftCombo(combo)) {
@@ -429,6 +475,11 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     // highlighted session. A window blur (Cmd+Tab away mid-switch) cancels so
     // the overlay never gets stranded waiting for a keyup that never comes.
     const onKeyUp = (event: KeyboardEvent) => {
+      if (heldDictateCodeRef.current === event.code) {
+        heldDictateCodeRef.current = null
+        requestComposerDictate('stop')
+      }
+
       if (event.key === 'Tab') {
         onSwitcherTabUp()
       }
@@ -438,7 +489,24 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
       }
     }
 
-    const onBlur = () => switcherActive() && closeSwitcher()
+    const stopDictationForLostFocus = () => {
+      if (heldDictateCodeRef.current || toggleDictateActiveRef.current) {
+        heldDictateCodeRef.current = null
+        toggleDictateActiveRef.current = false
+        requestComposerDictate('stop')
+      }
+    }
+
+    const onBlur = () => {
+      stopDictationForLostFocus()
+      switcherActive() && closeSwitcher()
+    }
+
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        stopDictationForLostFocus()
+      }
+    }
 
     // Swallow trailing contextmenu after Ctrl+click commit (Electron main menu).
     const onContextMenu = (event: MouseEvent) => {
@@ -451,6 +519,7 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     window.addEventListener('keydown', onKeyDown, { capture: true })
     window.addEventListener('keyup', onKeyUp, { capture: true })
     window.addEventListener('blur', onBlur)
+    document.addEventListener('visibilitychange', onVisibilityChange)
     window.addEventListener('contextmenu', onContextMenu, { capture: true })
     // Paste twin of type-to-focus: ⌘V on non-editable chrome routes the
     // clipboard (text AND images) into the active composer. Bubble phase so
@@ -464,6 +533,7 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
       window.removeEventListener('keydown', onKeyDown, { capture: true })
       window.removeEventListener('keyup', onKeyUp, { capture: true })
       window.removeEventListener('blur', onBlur)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
       window.removeEventListener('contextmenu', onContextMenu, { capture: true })
       window.removeEventListener('paste', handleWindowPaste)
       window.removeEventListener('keydown', handleComposerFocusChord)

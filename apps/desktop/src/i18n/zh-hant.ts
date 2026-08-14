@@ -245,6 +245,15 @@ export const zhHant = defineLocale({
     resetHudLayout: '重設 HUD 大小和位置'
   },
 
+  keybinds: {
+    dictateMode: '聽寫手勢',
+    hold: '按住',
+    toggle: '切換',
+    actions: {
+      'composer.dictate': '聽寫到輸入框'
+    }
+  },
+
   language: {
     label: '語言',
     description: '選擇桌面介面的語言。',

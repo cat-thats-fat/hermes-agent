@@ -253,6 +253,15 @@ export const ja = defineLocale({
     resetHudLayout: 'HUD のサイズと位置をリセット'
   },
 
+  keybinds: {
+    dictateMode: '音声入力の操作',
+    hold: '押している間',
+    toggle: '切り替え',
+    actions: {
+      'composer.dictate': '音声をコンポーザーに入力'
+    }
+  },
+
   language: {
     label: '言語',
     description: 'デスクトップインターフェイスの言語を選択します。',
