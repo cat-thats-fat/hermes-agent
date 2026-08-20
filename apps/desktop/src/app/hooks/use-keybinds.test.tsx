@@ -46,8 +46,8 @@ describe('composer.dictate keybind', () => {
     markActiveComposer('tile:one')
     const requests: Array<{ request: string; target: string }> = []
     const off = onComposerDictateRequest(detail => requests.push(detail))
-    const textarea = document.createElement('textarea')
-    document.body.append(textarea)
+    const textarea = globalThis.document.createElement('textarea')
+    globalThis.document.body.append(textarea)
 
     renderHook(() => useKeybinds(deps), { wrapper: MemoryRouter })
 

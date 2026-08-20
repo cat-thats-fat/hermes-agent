@@ -5,17 +5,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { MicRecording } from './use-mic-recorder'
 
-const handle = {
-  cancel: vi.fn(),
-  start: vi.fn(async () => undefined),
-  stop: vi.fn<() => Promise<MicRecording | null>>(async () => ({
-    audio: new Blob(['audio']),
-    durationMs: 100,
-    heardSpeech: true
-  }))
-}
-
-const notify = vi.fn()
+const { handle, notify } = vi.hoisted(() => ({
+  handle: {
+    cancel: vi.fn(),
+    start: vi.fn(async () => undefined),
+    stop: vi.fn<() => Promise<MicRecording | null>>(async () => ({
+      audio: new Blob(['audio']),
+      durationMs: 100,
+      heardSpeech: true
+    }))
+  },
+  notify: vi.fn()
+}))
 
 vi.mock('./use-mic-recorder', () => ({
   useMicRecorder: () => ({ handle, level: 0, recording: false })

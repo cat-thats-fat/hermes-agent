@@ -541,6 +541,7 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     // ⌘/Ctrl+L moves focus to the composer. Bubble phase so capture-phase
     // claimants run first; the priority ladder lives in focus-chord.ts.
     window.addEventListener('keydown', handleComposerFocusChord)
+
     const offDictateState = onComposerDictateStateChange(({ state, target }) => {
       if (target !== dictateTargetRef.current) {
         return

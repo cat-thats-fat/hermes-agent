@@ -254,6 +254,7 @@ export function useComposerVoice({
     [target, toggleVoiceConversation]
   )
 
+  // eslint-disable-next-line no-restricted-syntax -- this is an immediate ownership token, not a mirrored reactive value
   useEffect(() => {
     if (target === 'main' && !disabled && takeVoiceConversationStart(voiceStartRequest) && !voiceConversationActive) {
       voiceConversationActiveRef.current = true
