@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -51,8 +53,6 @@ describe('useVoiceRecorder dictation', () => {
   it('inserts a completed transcript into the draft callback without submitting', async () => {
     const onTranscript = vi.fn()
 
-    const onSubmit = vi.fn()
-
     const { result } = renderHook(() =>
       useVoiceRecorder({
         focusInput: vi.fn(),
@@ -68,7 +68,6 @@ describe('useVoiceRecorder dictation', () => {
     })
 
     expect(onTranscript).toHaveBeenCalledWith('dictated words')
-    expect(onSubmit).not.toHaveBeenCalled()
   })
 
   it('warns and leaves the draft untouched for an empty transcript', async () => {

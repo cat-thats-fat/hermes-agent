@@ -66,6 +66,9 @@ import { openNewWindow } from '@/store/windows'
 import { useTheme } from '@/themes/context'
 
 import {
+  type ComposerTarget,
+  getActiveComposer,
+  onComposerDictateStateChange,
   requestComposerDictate,
   requestComposerFocus,
   requestModelMenuToggle,
@@ -118,6 +121,8 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
   // re-matching a combo because modifier keyup changes the combo mid-gesture.
   const heldDictateCodeRef = useRef<string | null>(null)
   const toggleDictateActiveRef = useRef(false)
+  const dictateLiveRef = useRef(false)
+  const dictateTargetRef = useRef<ComposerTarget | null>(null)
 
   const profileSwitchHandlers: HandlerMap = {}
 
@@ -381,11 +386,13 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
       // Escape is a cancel gesture only while this dispatcher initiated a
       // dictation recording. It discards audio (unlike keyup/blur, which
       // transcribe) and otherwise leaves normal composer Escape untouched.
-      if (event.key === 'Escape' && (heldDictateCodeRef.current || toggleDictateActiveRef.current)) {
+      if (event.key === 'Escape' && dictateLiveRef.current && dictateTargetRef.current) {
         event.preventDefault()
+        event.stopPropagation()
+        dictateLiveRef.current = false
         heldDictateCodeRef.current = null
         toggleDictateActiveRef.current = false
-        requestComposerDictate('cancel')
+        requestComposerDictate('cancel', dictateTargetRef.current)
 
         return
       }
@@ -420,7 +427,7 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
         return
       }
 
-      if (isEditableTarget(event.target) && !actionAllowedInInput(actionId, combo)) {
+      if (isEditableTarget(event.target) && actionId !== 'composer.dictate' && !actionAllowedInInput(actionId, combo)) {
         return
       }
 
@@ -437,10 +444,15 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
 
         if ($dictateMode.get() === 'hold') {
           heldDictateCodeRef.current = event.code
-          requestComposerDictate('start')
+          dictateTargetRef.current = getActiveComposer()
+          requestComposerDictate('start', dictateTargetRef.current)
         } else {
-          toggleDictateActiveRef.current = !toggleDictateActiveRef.current
-          requestComposerDictate('toggle')
+          if (!toggleDictateActiveRef.current) {
+            toggleDictateActiveRef.current = true
+            dictateTargetRef.current = getActiveComposer()
+          }
+
+          requestComposerDictate('toggle', dictateTargetRef.current ?? getActiveComposer())
         }
 
         return
@@ -477,7 +489,7 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     const onKeyUp = (event: KeyboardEvent) => {
       if (heldDictateCodeRef.current === event.code) {
         heldDictateCodeRef.current = null
-        requestComposerDictate('stop')
+        dictateTargetRef.current && requestComposerDictate('stop', dictateTargetRef.current)
       }
 
       if (event.key === 'Tab') {
@@ -490,10 +502,11 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     }
 
     const stopDictationForLostFocus = () => {
-      if (heldDictateCodeRef.current || toggleDictateActiveRef.current) {
+      if (dictateLiveRef.current && dictateTargetRef.current) {
+        dictateLiveRef.current = false
         heldDictateCodeRef.current = null
         toggleDictateActiveRef.current = false
-        requestComposerDictate('stop')
+        requestComposerDictate('stop', dictateTargetRef.current)
       }
     }
 
@@ -528,6 +541,22 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     // ⌘/Ctrl+L moves focus to the composer. Bubble phase so capture-phase
     // claimants run first; the priority ladder lives in focus-chord.ts.
     window.addEventListener('keydown', handleComposerFocusChord)
+    const offDictateState = onComposerDictateStateChange(({ state, target }) => {
+      if (target !== dictateTargetRef.current) {
+        return
+      }
+
+      if (state === 'started') {
+        dictateLiveRef.current = true
+
+        return
+      }
+
+      dictateLiveRef.current = false
+      heldDictateCodeRef.current = null
+      toggleDictateActiveRef.current = false
+      dictateTargetRef.current = null
+    })
 
     return () => {
       window.removeEventListener('keydown', onKeyDown, { capture: true })
@@ -537,6 +566,7 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
       window.removeEventListener('contextmenu', onContextMenu, { capture: true })
       window.removeEventListener('paste', handleWindowPaste)
       window.removeEventListener('keydown', handleComposerFocusChord)
+      offDictateState()
     }
   }, [])
 }
