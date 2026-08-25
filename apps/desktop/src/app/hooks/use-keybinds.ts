@@ -121,7 +121,11 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
   // re-matching a combo because modifier keyup changes the combo mid-gesture.
   const heldDictateCodeRef = useRef<string | null>(null)
   const toggleDictateActiveRef = useRef(false)
-  const dictateLiveRef = useRef(false)
+  // Each keybind-owned take gets an identity. Composer-target alone is not
+  // sufficient: a deferred `finished` from a cancelled take can arrive after
+  // another take has already begun on that same composer.
+  const dictateGenerationRef = useRef(0)
+  const activeDictateGenerationRef = useRef<number | null>(null)
   const dictateTargetRef = useRef<ComposerTarget | null>(null)
 
   const profileSwitchHandlers: HandlerMap = {}
@@ -386,13 +390,12 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
       // Escape is a cancel gesture only while this dispatcher initiated a
       // dictation recording. It discards audio (unlike keyup/blur, which
       // transcribe) and otherwise leaves normal composer Escape untouched.
-      if (event.key === 'Escape' && dictateLiveRef.current && dictateTargetRef.current) {
+      if (event.key === 'Escape' && dictateTargetRef.current && activeDictateGenerationRef.current !== null) {
         event.preventDefault()
         event.stopPropagation()
-        dictateLiveRef.current = false
         heldDictateCodeRef.current = null
         toggleDictateActiveRef.current = false
-        requestComposerDictate('cancel', dictateTargetRef.current)
+        requestComposerDictate('cancel', dictateTargetRef.current, activeDictateGenerationRef.current)
 
         return
       }
@@ -445,14 +448,20 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
         if ($dictateMode.get() === 'hold') {
           heldDictateCodeRef.current = event.code
           dictateTargetRef.current = getActiveComposer()
-          requestComposerDictate('start', dictateTargetRef.current)
+          activeDictateGenerationRef.current = ++dictateGenerationRef.current
+          requestComposerDictate('start', dictateTargetRef.current, activeDictateGenerationRef.current)
         } else {
           if (!toggleDictateActiveRef.current) {
             toggleDictateActiveRef.current = true
             dictateTargetRef.current = getActiveComposer()
+            activeDictateGenerationRef.current = ++dictateGenerationRef.current
           }
 
-          requestComposerDictate('toggle', dictateTargetRef.current ?? getActiveComposer())
+          requestComposerDictate(
+            'toggle',
+            dictateTargetRef.current ?? getActiveComposer(),
+            activeDictateGenerationRef.current ?? undefined
+          )
         }
 
         return
@@ -489,7 +498,10 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     const onKeyUp = (event: KeyboardEvent) => {
       if (heldDictateCodeRef.current === event.code) {
         heldDictateCodeRef.current = null
-        dictateTargetRef.current && requestComposerDictate('stop', dictateTargetRef.current)
+
+        if (dictateTargetRef.current && activeDictateGenerationRef.current !== null) {
+          requestComposerDictate('stop', dictateTargetRef.current, activeDictateGenerationRef.current)
+        }
       }
 
       if (event.key === 'Tab') {
@@ -502,11 +514,10 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     }
 
     const stopDictationForLostFocus = () => {
-      if (dictateLiveRef.current && dictateTargetRef.current) {
-        dictateLiveRef.current = false
+      if (dictateTargetRef.current && activeDictateGenerationRef.current !== null) {
         heldDictateCodeRef.current = null
         toggleDictateActiveRef.current = false
-        requestComposerDictate('stop', dictateTargetRef.current)
+        requestComposerDictate('stop', dictateTargetRef.current, activeDictateGenerationRef.current)
       }
     }
 
@@ -542,20 +553,18 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     // claimants run first; the priority ladder lives in focus-chord.ts.
     window.addEventListener('keydown', handleComposerFocusChord)
 
-    const offDictateState = onComposerDictateStateChange(({ state, target }) => {
-      if (target !== dictateTargetRef.current) {
+    const offDictateState = onComposerDictateStateChange(({ generation, state, target }) => {
+      if (target !== dictateTargetRef.current || generation !== activeDictateGenerationRef.current) {
         return
       }
 
       if (state === 'started') {
-        dictateLiveRef.current = true
-
         return
       }
 
-      dictateLiveRef.current = false
       heldDictateCodeRef.current = null
       toggleDictateActiveRef.current = false
+      activeDictateGenerationRef.current = null
       dictateTargetRef.current = null
     })
 

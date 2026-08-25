@@ -68,6 +68,10 @@ export function useComposerVoice({
   const dictationStartingRef = useRef(false)
   const dictationStopRequestedRef = useRef(false)
   const dictationCancelRequestedRef = useRef(false)
+  // The keybind dispatcher labels each gesture. Keep that label with the
+  // recorder lifecycle so a deferred completion cannot finish a newer take on
+  // the same composer.
+  const dictationGenerationRef = useRef<number | undefined>(undefined)
   // Key events can arrive before React paints the recorder status update.
   // Keep the live capture truth in a ref so a quick hold/release cannot strand
   // the mic waiting for its duration cap.
@@ -121,7 +125,8 @@ export function useComposerVoice({
 
   const finishDictation = useCallback(() => {
     dictationActiveRef.current = false
-    reportComposerDictateState('finished', target)
+    reportComposerDictateState('finished', target, dictationGenerationRef.current)
+    dictationGenerationRef.current = undefined
     resumeWakeIfUnused()
   }, [resumeWakeIfUnused, target])
 
@@ -285,83 +290,108 @@ export function useComposerVoice({
 
   useEffect(() => resumeWakeIfUnused, [resumeWakeIfUnused])
 
-  const startDictation = useCallback(async () => {
-    // Conversation owns the shared recorder. Do not stop or alter it from a
-    // dictate key; a stray hold while talking must be a harmless no-op.
-    if (disabled || voiceConversationActiveRef.current || voiceStatus !== 'idle' || dictationStartingRef.current) {
-      return
-    }
-
-    dictationStartingRef.current = true
-    dictationStopRequestedRef.current = false
-    dictationCancelRequestedRef.current = false
-
-    try {
-      await pauseWakeForVoice()
-
-      if (voiceConversationActiveRef.current) {
-        reportComposerDictateState('finished', target)
+  const startDictation = useCallback(
+    async (generation?: number) => {
+      // Conversation owns the shared recorder. Do not stop or alter it from a
+      // dictate key; a stray hold while talking must be a harmless no-op.
+      if (disabled || voiceConversationActiveRef.current || voiceStatus !== 'idle' || dictationStartingRef.current) {
+        reportComposerDictateState('finished', target, generation)
 
         return
       }
 
-      if (!(await start())) {
-        reportComposerDictateState('finished', target)
+      dictationStartingRef.current = true
+      dictationGenerationRef.current = generation
+      dictationStopRequestedRef.current = false
+      dictationCancelRequestedRef.current = false
+
+      try {
+        await pauseWakeForVoice()
+
+        if (voiceConversationActiveRef.current) {
+          reportComposerDictateState('finished', target, generation)
+          dictationGenerationRef.current = undefined
+
+          return
+        }
+
+        if (!(await start())) {
+          reportComposerDictateState('finished', target, generation)
+          dictationGenerationRef.current = undefined
+
+          return
+        }
+
+        dictationActiveRef.current = true
+        reportComposerDictateState('started', target, generation)
+
+        // The focus bus deliberately defers commands. A very short hold can
+        // therefore queue stop immediately after start, before React has painted
+        // `voiceStatus: 'recording'`; retain that intent instead of leaving mic
+        // capture open until max duration.
+        if (dictationCancelRequestedRef.current) {
+          cancel()
+        } else if (dictationStopRequestedRef.current) {
+          void stop()
+        }
+      } finally {
+        dictationStartingRef.current = false
+        resumeWakeIfUnused()
+      }
+    },
+    [cancel, disabled, pauseWakeForVoice, resumeWakeIfUnused, start, stop, target, voiceStatus]
+  )
+
+  const stopDictation = useCallback(
+    (generation?: number) => {
+      if (dictationStartingRef.current) {
+        dictationStopRequestedRef.current = true
 
         return
       }
 
-      dictationActiveRef.current = true
-      reportComposerDictateState('started', target)
+      if (dictationActiveRef.current) {
+        if (generation !== undefined) {
+          dictationGenerationRef.current = generation
+        }
 
-      // The focus bus deliberately defers commands. A very short hold can
-      // therefore queue stop immediately after start, before React has painted
-      // `voiceStatus: 'recording'`; retain that intent instead of leaving mic
-      // capture open until max duration.
-      if (dictationCancelRequestedRef.current) {
-        cancel()
-      } else if (dictationStopRequestedRef.current) {
         void stop()
       }
-    } finally {
-      dictationStartingRef.current = false
-      resumeWakeIfUnused()
-    }
-  }, [cancel, disabled, pauseWakeForVoice, resumeWakeIfUnused, start, stop, target, voiceStatus])
+    },
+    [stop]
+  )
 
-  const stopDictation = useCallback(() => {
-    if (dictationStartingRef.current) {
-      dictationStopRequestedRef.current = true
+  const cancelDictation = useCallback(
+    (generation?: number) => {
+      if (dictationStartingRef.current) {
+        dictationCancelRequestedRef.current = true
 
-      return
-    }
+        return
+      }
 
-    if (dictationActiveRef.current) {
-      void stop()
-    }
-  }, [stop])
+      if (dictationActiveRef.current) {
+        if (generation !== undefined) {
+          dictationGenerationRef.current = generation
+        }
 
-  const cancelDictation = useCallback(() => {
-    if (dictationStartingRef.current) {
-      dictationCancelRequestedRef.current = true
-
-      return
-    }
-
-    if (dictationActiveRef.current) {
-      cancel()
-    }
-  }, [cancel])
+        cancel()
+      }
+    },
+    [cancel]
+  )
 
   cancelDictationRef.current = cancelDictation
 
-  const toggleDictation = useCallback(() => {
-    if (dictationActiveRef.current || dictationStartingRef.current) {
-      stopDictation()
-    } else {
-      void startDictation()
-    }
-  }, [startDictation, stopDictation])
+  const toggleDictation = useCallback(
+    (generation?: number) => {
+      if (dictationActiveRef.current || dictationStartingRef.current) {
+        stopDictation(generation)
+      } else {
+        void startDictation(generation)
+      }
+    },
+    [startDictation, stopDictation]
+  )
 
   useEffect(() => {
     if (voiceConversationActive) {
@@ -374,19 +404,19 @@ export function useComposerVoice({
 
   useEffect(
     () =>
-      onComposerDictateRequest(({ request, target: requestTarget }) => {
+      onComposerDictateRequest(({ generation, request, target: requestTarget }) => {
         if (requestTarget !== target) {
           return
         }
 
         if (request === 'start') {
-          void startDictation()
+          void startDictation(generation)
         } else if (request === 'stop') {
-          stopDictation()
+          stopDictation(generation)
         } else if (request === 'cancel') {
-          cancelDictation()
+          cancelDictation(generation)
         } else {
-          toggleDictation()
+          toggleDictation(generation)
         }
       }),
     [cancelDictation, startDictation, stopDictation, target, toggleDictation]

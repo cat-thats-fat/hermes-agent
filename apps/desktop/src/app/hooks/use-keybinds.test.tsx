@@ -2,7 +2,7 @@
 
 import { fireEvent, renderHook } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { markActiveComposer, onComposerDictateRequest, reportComposerDictateState } from '@/app/chat/composer/focus'
 import { $dictateMode, resetBinding, setBinding } from '@/store/keybinds'
@@ -44,7 +44,7 @@ describe('composer.dictate keybind', () => {
   it('works from an editable draft and pins hold stop to the composer that started it', async () => {
     setBinding('composer.dictate', ['alt+v'])
     markActiveComposer('tile:one')
-    const requests: Array<{ request: string; target: string }> = []
+    const requests: Array<{ generation?: number; request: string; target: string }> = []
     const off = onComposerDictateRequest(detail => requests.push(detail))
     const textarea = globalThis.document.createElement('textarea')
     globalThis.document.body.append(textarea)
@@ -59,8 +59,58 @@ describe('composer.dictate keybind', () => {
     textarea.remove()
 
     expect(requests).toEqual([
-      { request: 'start', target: 'tile:one' },
-      { request: 'stop', target: 'tile:one' }
+      { generation: 1, request: 'start', target: 'tile:one' },
+      { generation: 1, request: 'stop', target: 'tile:one' }
+    ])
+  })
+
+  it('claims Escape from a focused draft while a take is starting', async () => {
+    setBinding('composer.dictate', ['alt+v'])
+    const requests: string[] = []
+    const haltRun = vi.fn()
+    const off = onComposerDictateRequest(({ request }) => requests.push(request))
+    const textarea = globalThis.document.createElement('textarea')
+    textarea.addEventListener('keydown', haltRun)
+    globalThis.document.body.append(textarea)
+
+    renderHook(() => useKeybinds(deps), { wrapper: MemoryRouter })
+
+    fireEvent.keyDown(textarea, { altKey: true, code: 'KeyV', key: 'v' })
+    const escape = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' })
+    textarea.dispatchEvent(escape)
+    await flushDispatch()
+    off()
+    textarea.remove()
+
+    expect(escape.defaultPrevented).toBe(true)
+    expect(haltRun).not.toHaveBeenCalled()
+    expect(requests).toEqual(['start', 'cancel'])
+  })
+
+  it('keeps a newer same-composer take pinned when an older take finishes late', async () => {
+    setBinding('composer.dictate', ['alt+v'])
+    const requests: Array<{ generation?: number; request: string }> = []
+    const off = onComposerDictateRequest(({ generation, request }) => requests.push({ generation, request }))
+
+    renderHook(() => useKeybinds(deps), { wrapper: MemoryRouter })
+
+    fireEvent.keyDown(window, { altKey: true, code: 'KeyV', key: 'v' })
+    reportComposerDictateState('started', 'main', 1)
+    const firstEscape = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' })
+    window.dispatchEvent(firstEscape)
+    fireEvent.keyDown(window, { altKey: true, code: 'KeyV', key: 'v' })
+    reportComposerDictateState('finished', 'main', 1)
+    reportComposerDictateState('started', 'main', 2)
+    await flushDispatch()
+    fireEvent.blur(window)
+    await flushDispatch()
+    off()
+
+    expect(requests).toEqual([
+      { generation: 1, request: 'start' },
+      { generation: 1, request: 'cancel' },
+      { generation: 2, request: 'start' },
+      { generation: 2, request: 'stop' }
     ])
   })
 
@@ -74,7 +124,7 @@ describe('composer.dictate keybind', () => {
 
     fireEvent.keyDown(window, { altKey: true, code: 'KeyV', key: 'v' })
     await flushDispatch()
-    reportComposerDictateState('started', 'main')
+    reportComposerDictateState('started', 'main', 1)
     await flushDispatch()
 
     const firstEscape = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' })
@@ -85,7 +135,7 @@ describe('composer.dictate keybind', () => {
 
     fireEvent.keyDown(window, { altKey: true, code: 'KeyV', key: 'v' })
     await flushDispatch()
-    reportComposerDictateState('started', 'main')
+    reportComposerDictateState('started', 'main', 2)
     await flushDispatch()
     fireEvent.blur(window)
     await flushDispatch()
