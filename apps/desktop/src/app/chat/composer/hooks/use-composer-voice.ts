@@ -14,7 +14,7 @@ import { $autoSpeakReplies, $voiceStopPhrase, setAutoSpeakReplies } from '@/stor
 import { resumeWakeAfterVoice } from '@/store/wake-word'
 
 import type { ComposerTarget } from '../focus'
-import { onComposerVoiceToggleRequest } from '../focus'
+import { onComposerDictateRequest, onComposerVoiceToggleRequest, reportComposerDictateState } from '../focus'
 import { useComposerScope } from '../scope'
 import type { ChatBarProps } from '../types'
 
@@ -65,12 +65,77 @@ export function useComposerVoice({
   const [voiceConversationActive, setVoiceConversationActive] = useState(false)
   const ownsWakeIndicatorRef = useRef(false)
   const voiceStartRequest = useStore($voiceConversationStartRequest)
+  const dictationStartingRef = useRef(false)
+  const dictationStopRequestedRef = useRef(false)
+  const dictationCancelRequestedRef = useRef(false)
+  // The keybind dispatcher labels each gesture. Keep that label with the
+  // recorder lifecycle so a deferred completion cannot finish a newer take on
+  // the same composer.
+  const dictationGenerationRef = useRef<number | undefined>(undefined)
+  // Key events can arrive before React paints the recorder status update.
+  // Keep the live capture truth in a ref so a quick hold/release cannot strand
+  // the mic waiting for its duration cap.
+  const dictationActiveRef = useRef(false)
+  const cancelDictationRef = useRef<() => void>(() => undefined)
+  const voiceConversationActiveRef = useRef(voiceConversationActive)
+  voiceConversationActiveRef.current = voiceConversationActive
 
-  const { dictate, voiceActivityState, voiceStatus } = useVoiceRecorder({
+  const wakePausedRef = useRef(false)
+  // Resolves once the in-flight wake.pause round-trip completes (mic released by
+  // the wake listener). Both conversation and dictation await this before
+  // opening the recorder, so Windows never sees two clients fighting for it.
+  const wakePauseBarrierRef = useRef<Promise<void> | null>(null)
+
+  const resumeWakeIfUnused = useCallback(() => {
+    if (
+      !wakePausedRef.current ||
+      voiceConversationActiveRef.current ||
+      dictationActiveRef.current ||
+      dictationStartingRef.current
+    ) {
+      return
+    }
+
+    wakePausedRef.current = false
+    wakePauseBarrierRef.current = null
+    void resumeWakeAfterVoice()
+  }, [])
+
+  // The ref is a request token (did WE issue wake.pause?), not an atom mirror —
+  // it prevents either voice mode from rearming a detector owned elsewhere.
+  const pauseWakeForVoice = useCallback(() => {
+    if (wakePausedRef.current) {
+      return wakePauseBarrierRef.current ?? Promise.resolve()
+    }
+
+    wakePausedRef.current = true
+
+    const barrier = (async () => {
+      try {
+        await $gateway.get()?.request('wake.pause', {})
+      } catch {
+        // No wake listener / older backend — nothing held the mic.
+      }
+    })()
+
+    wakePauseBarrierRef.current = barrier
+
+    return barrier
+  }, [])
+
+  const finishDictation = useCallback(() => {
+    dictationActiveRef.current = false
+    reportComposerDictateState('finished', target, dictationGenerationRef.current)
+    dictationGenerationRef.current = undefined
+    resumeWakeIfUnused()
+  }, [resumeWakeIfUnused, target])
+
+  const { cancel, start, stop, voiceActivityState, voiceStatus } = useVoiceRecorder({
     focusInput,
     maxRecordingSeconds,
     onTranscript: insertText,
-    onTranscribeAudio
+    onTranscribeAudio,
+    onFinished: finishDictation
   })
 
   /** Auto-speak selector: the latest unspoken reply only — a backlog collapses to the newest. */
@@ -127,14 +192,6 @@ export function useComposerVoice({
     await onSubmit(text)
   }
 
-  const wakePausedRef = useRef(false)
-  // Resolves once the in-flight wake.pause round-trip completes (mic released by
-  // the wake listener). The conversation awaits this before opening its own mic
-  // so the two never contend for the device — on Windows especially, opening the
-  // capture device while the wake listener still holds it makes getUserMedia
-  // fail and the conversation never starts listening.
-  const wakePauseBarrierRef = useRef<Promise<void> | null>(null)
-
   const conversation = useVoiceConversation({
     busy,
     consumePendingResponse,
@@ -189,6 +246,10 @@ export function useComposerVoice({
       setVoiceConversationActive(false)
       void conversation.end()
     } else {
+      // Starting a conversation wins the mic immediately; do not let a
+      // dictation take overlap it while React effects are catching up.
+      voiceConversationActiveRef.current = true
+      cancelDictationRef.current()
       setVoiceConversationActive(true)
     }
   }, [conversation, disabled, voiceConversationActive])
@@ -198,50 +259,14 @@ export function useComposerVoice({
     [target, toggleVoiceConversation]
   )
 
+  // eslint-disable-next-line no-restricted-syntax -- this is an immediate ownership token, not a mirrored reactive value
   useEffect(() => {
     if (target === 'main' && !disabled && takeVoiceConversationStart(voiceStartRequest) && !voiceConversationActive) {
+      voiceConversationActiveRef.current = true
+      cancelDictationRef.current()
       setVoiceConversationActive(true)
     }
   }, [disabled, target, voiceConversationActive, voiceStartRequest])
-
-  const resumeWakeIfPaused = useCallback(() => {
-    if (!wakePausedRef.current) {
-      return
-    }
-
-    wakePausedRef.current = false
-    wakePauseBarrierRef.current = null
-    // Reconcile, don't just resume: the wake word is a persistent setting, so
-    // ending a voice chat must re-arm the listener whenever config says
-    // enabled — including when the raw resume loses the mic-release race.
-    void resumeWakeAfterVoice()
-  }, [])
-
-  // The ref is a request token (did WE issue wake.pause?), not an atom mirror —
-  // it guards resumeWakeIfPaused from resuming a detector another surface owns.
-  const pauseWakeForVoice = useCallback(() => {
-    wakePausedRef.current = true
-
-    const barrier = (async () => {
-      try {
-        await $gateway.get()?.request('wake.pause', {})
-      } catch {
-        // No wake listener / older backend — nothing held the mic.
-      }
-    })()
-
-    wakePauseBarrierRef.current = barrier
-
-    return barrier
-  }, [])
-
-  useEffect(() => {
-    if (voiceConversationActive) {
-      pauseWakeForVoice()
-    } else {
-      resumeWakeIfPaused()
-    }
-  }, [pauseWakeForVoice, resumeWakeIfPaused, voiceConversationActive])
 
   // 'Say "stop" to end the voice chat.' notice when the conversation starts.
   // Phrase comes from voice.stop_phrases (first entry) so a custom phrase
@@ -263,11 +288,147 @@ export function useComposerVoice({
     }
   }, [t, voiceConversationActive])
 
-  useEffect(() => resumeWakeIfPaused, [resumeWakeIfPaused])
+  useEffect(() => resumeWakeIfUnused, [resumeWakeIfUnused])
+
+  const startDictation = useCallback(
+    async (generation?: number) => {
+      // Conversation owns the shared recorder. Do not stop or alter it from a
+      // dictate key; a stray hold while talking must be a harmless no-op.
+      if (disabled || voiceConversationActiveRef.current || voiceStatus !== 'idle' || dictationStartingRef.current) {
+        reportComposerDictateState('finished', target, generation)
+
+        return
+      }
+
+      dictationStartingRef.current = true
+      dictationGenerationRef.current = generation
+      dictationStopRequestedRef.current = false
+      dictationCancelRequestedRef.current = false
+
+      try {
+        await pauseWakeForVoice()
+
+        if (voiceConversationActiveRef.current) {
+          reportComposerDictateState('finished', target, generation)
+          dictationGenerationRef.current = undefined
+
+          return
+        }
+
+        if (!(await start())) {
+          reportComposerDictateState('finished', target, generation)
+          dictationGenerationRef.current = undefined
+
+          return
+        }
+
+        dictationActiveRef.current = true
+        reportComposerDictateState('started', target, generation)
+
+        // The focus bus deliberately defers commands. A very short hold can
+        // therefore queue stop immediately after start, before React has painted
+        // `voiceStatus: 'recording'`; retain that intent instead of leaving mic
+        // capture open until max duration.
+        if (dictationCancelRequestedRef.current) {
+          cancel()
+        } else if (dictationStopRequestedRef.current) {
+          void stop()
+        }
+      } finally {
+        dictationStartingRef.current = false
+        resumeWakeIfUnused()
+      }
+    },
+    [cancel, disabled, pauseWakeForVoice, resumeWakeIfUnused, start, stop, target, voiceStatus]
+  )
+
+  const stopDictation = useCallback(
+    (generation?: number) => {
+      if (dictationStartingRef.current) {
+        dictationStopRequestedRef.current = true
+
+        return
+      }
+
+      if (dictationActiveRef.current) {
+        if (generation !== undefined) {
+          dictationGenerationRef.current = generation
+        }
+
+        void stop()
+      }
+    },
+    [stop]
+  )
+
+  const cancelDictation = useCallback(
+    (generation?: number) => {
+      if (dictationStartingRef.current) {
+        dictationCancelRequestedRef.current = true
+
+        return
+      }
+
+      if (dictationActiveRef.current) {
+        if (generation !== undefined) {
+          dictationGenerationRef.current = generation
+        }
+
+        cancel()
+      }
+    },
+    [cancel]
+  )
+
+  cancelDictationRef.current = cancelDictation
+
+  const toggleDictation = useCallback(
+    (generation?: number) => {
+      if (dictationActiveRef.current || dictationStartingRef.current) {
+        stopDictation(generation)
+      } else {
+        void startDictation(generation)
+      }
+    },
+    [startDictation, stopDictation]
+  )
+
+  useEffect(() => {
+    if (voiceConversationActive) {
+      cancelDictation()
+      void pauseWakeForVoice()
+    } else {
+      resumeWakeIfUnused()
+    }
+  }, [cancelDictation, pauseWakeForVoice, resumeWakeIfUnused, voiceConversationActive])
+
+  useEffect(
+    () =>
+      onComposerDictateRequest(({ generation, request, target: requestTarget }) => {
+        if (requestTarget !== target) {
+          return
+        }
+
+        if (request === 'start') {
+          void startDictation(generation)
+        } else if (request === 'stop') {
+          stopDictation(generation)
+        } else if (request === 'cancel') {
+          cancelDictation(generation)
+        } else {
+          toggleDictation(generation)
+        }
+      }),
+    [cancelDictation, startDictation, stopDictation, target, toggleDictation]
+  )
 
   // Explicit start/end for the on-screen conversation controls (the hotkey uses
   // the gated toggle above).
-  const startConversation = useCallback(() => setVoiceConversationActive(true), [])
+  const startConversation = useCallback(() => {
+    voiceConversationActiveRef.current = true
+    cancelDictationRef.current()
+    setVoiceConversationActive(true)
+  }, [])
 
   const endConversation = useCallback(() => {
     setVoiceConversationActive(false)
@@ -290,7 +451,7 @@ export function useComposerVoice({
 
   return {
     conversation,
-    dictate,
+    dictate: toggleDictation,
     endConversation,
     handleToggleAutoSpeak,
     startConversation,

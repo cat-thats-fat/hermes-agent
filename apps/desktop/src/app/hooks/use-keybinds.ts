@@ -29,7 +29,7 @@ import {
   openFindBar
 } from '@/store/find-in-page'
 import { toggleHud } from '@/store/hud'
-import { $capture, $comboIndex, endCapture, setBinding } from '@/store/keybinds'
+import { $capture, $comboIndex, $dictateMode, endCapture, setBinding } from '@/store/keybinds'
 import {
   requestSessionSearchFocus,
   setFileBrowserOpen,
@@ -65,7 +65,15 @@ import { toggleStatusbarVisible } from '@/store/statusbar-prefs'
 import { openNewWindow } from '@/store/windows'
 import { useTheme } from '@/themes/context'
 
-import { requestComposerFocus, requestModelMenuToggle, requestVoiceToggle } from '../chat/composer/focus'
+import {
+  type ComposerTarget,
+  getActiveComposer,
+  onComposerDictateStateChange,
+  requestComposerDictate,
+  requestComposerFocus,
+  requestModelMenuToggle,
+  requestVoiceToggle
+} from '../chat/composer/focus'
 import { handleComposerFocusChord } from '../chat/composer/focus-chord'
 import { handleWindowPaste } from '../chat/composer/paste-to-focus'
 import { openSession } from '../open-session'
@@ -109,6 +117,16 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
   // Keep the latest closures without re-subscribing the listener.
   const handlersRef = useRef<HandlerMap>({})
   const commitSwitcherRef = useRef<() => void>(() => {})
+  // The physical key that started a hold. Keyup must match this rather than
+  // re-matching a combo because modifier keyup changes the combo mid-gesture.
+  const heldDictateCodeRef = useRef<string | null>(null)
+  const toggleDictateActiveRef = useRef(false)
+  // Each keybind-owned take gets an identity. Composer-target alone is not
+  // sufficient: a deferred `finished` from a cancelled take can arrive after
+  // another take has already begun on that same composer.
+  const dictateGenerationRef = useRef(0)
+  const activeDictateGenerationRef = useRef<number | null>(null)
+  const dictateTargetRef = useRef<ComposerTarget | null>(null)
 
   const profileSwitchHandlers: HandlerMap = {}
 
@@ -318,6 +336,9 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     []
   )
 
+  // This listener needs an event-local hold identity across keydown/keyup; it
+  // is intentionally a ref rather than render state (no paint belongs here).
+  // eslint-disable-next-line no-restricted-syntax
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       // An active IME composition owns the keyboard. Windows Chinese IMEs
@@ -366,6 +387,27 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
         return
       }
 
+      // Escape is a cancel gesture only while this dispatcher initiated a
+      // dictation recording. It discards audio (unlike keyup/blur, which
+      // transcribe) and otherwise leaves normal composer Escape untouched.
+      if (event.key === 'Escape' && dictateTargetRef.current && activeDictateGenerationRef.current !== null) {
+        event.preventDefault()
+        event.stopPropagation()
+        const target = dictateTargetRef.current
+        const generation = activeDictateGenerationRef.current
+        heldDictateCodeRef.current = null
+        toggleDictateActiveRef.current = false
+        // Escape owns exactly one cancel gesture. Release the dispatcher pin
+        // synchronously so a second Escape can reach the composer (for
+        // example, to halt an in-flight agent run) without waiting for the
+        // recorder's deferred finished event.
+        activeDictateGenerationRef.current = null
+        dictateTargetRef.current = null
+        requestComposerDictate('cancel', target, generation)
+
+        return
+      }
+
       const combo = comboFromEvent(event)
 
       if (!combo) {
@@ -396,7 +438,40 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
         return
       }
 
-      if (isEditableTarget(event.target) && !actionAllowedInInput(actionId, combo)) {
+      if (isEditableTarget(event.target) && actionId !== 'composer.dictate' && !actionAllowedInInput(actionId, combo)) {
+        return
+      }
+
+      if (actionId === 'composer.dictate') {
+        // OS key-repeat must never create another MediaRecorder or flip toggle
+        // mode back off while the key is held.
+        if (event.repeat) {
+          event.preventDefault()
+
+          return
+        }
+
+        event.preventDefault()
+
+        if ($dictateMode.get() === 'hold') {
+          heldDictateCodeRef.current = event.code
+          dictateTargetRef.current = getActiveComposer()
+          activeDictateGenerationRef.current = ++dictateGenerationRef.current
+          requestComposerDictate('start', dictateTargetRef.current, activeDictateGenerationRef.current)
+        } else {
+          if (!toggleDictateActiveRef.current) {
+            toggleDictateActiveRef.current = true
+            dictateTargetRef.current = getActiveComposer()
+            activeDictateGenerationRef.current = ++dictateGenerationRef.current
+          }
+
+          requestComposerDictate(
+            'toggle',
+            dictateTargetRef.current ?? getActiveComposer(),
+            activeDictateGenerationRef.current ?? undefined
+          )
+        }
+
         return
       }
 
@@ -429,6 +504,14 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     // highlighted session. A window blur (Cmd+Tab away mid-switch) cancels so
     // the overlay never gets stranded waiting for a keyup that never comes.
     const onKeyUp = (event: KeyboardEvent) => {
+      if (heldDictateCodeRef.current === event.code) {
+        heldDictateCodeRef.current = null
+
+        if (dictateTargetRef.current && activeDictateGenerationRef.current !== null) {
+          requestComposerDictate('stop', dictateTargetRef.current, activeDictateGenerationRef.current)
+        }
+      }
+
       if (event.key === 'Tab') {
         onSwitcherTabUp()
       }
@@ -438,7 +521,24 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
       }
     }
 
-    const onBlur = () => switcherActive() && closeSwitcher()
+    const stopDictationForLostFocus = () => {
+      if (dictateTargetRef.current && activeDictateGenerationRef.current !== null) {
+        heldDictateCodeRef.current = null
+        toggleDictateActiveRef.current = false
+        requestComposerDictate('stop', dictateTargetRef.current, activeDictateGenerationRef.current)
+      }
+    }
+
+    const onBlur = () => {
+      stopDictationForLostFocus()
+      switcherActive() && closeSwitcher()
+    }
+
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        stopDictationForLostFocus()
+      }
+    }
 
     // Swallow trailing contextmenu after Ctrl+click commit (Electron main menu).
     const onContextMenu = (event: MouseEvent) => {
@@ -451,6 +551,7 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     window.addEventListener('keydown', onKeyDown, { capture: true })
     window.addEventListener('keyup', onKeyUp, { capture: true })
     window.addEventListener('blur', onBlur)
+    document.addEventListener('visibilitychange', onVisibilityChange)
     window.addEventListener('contextmenu', onContextMenu, { capture: true })
     // Paste twin of type-to-focus: ⌘V on non-editable chrome routes the
     // clipboard (text AND images) into the active composer. Bubble phase so
@@ -460,13 +561,30 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     // claimants run first; the priority ladder lives in focus-chord.ts.
     window.addEventListener('keydown', handleComposerFocusChord)
 
+    const offDictateState = onComposerDictateStateChange(({ generation, state, target }) => {
+      if (target !== dictateTargetRef.current || generation !== activeDictateGenerationRef.current) {
+        return
+      }
+
+      if (state === 'started') {
+        return
+      }
+
+      heldDictateCodeRef.current = null
+      toggleDictateActiveRef.current = false
+      activeDictateGenerationRef.current = null
+      dictateTargetRef.current = null
+    })
+
     return () => {
       window.removeEventListener('keydown', onKeyDown, { capture: true })
       window.removeEventListener('keyup', onKeyUp, { capture: true })
       window.removeEventListener('blur', onBlur)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
       window.removeEventListener('contextmenu', onContextMenu, { capture: true })
       window.removeEventListener('paste', handleWindowPaste)
       window.removeEventListener('keydown', handleComposerFocusChord)
+      offDictateState()
     }
   }, [])
 }

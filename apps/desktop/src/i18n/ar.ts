@@ -231,6 +231,9 @@ export const ar = defineLocale({
     resetAll: 'إعادة تعيين الكل',
     pressKey: 'اضغط مفتاحا...',
     set: 'مضبوط',
+    dictateMode: 'إيماءة الإملاء',
+    hold: 'اضغط باستمرار',
+    toggle: 'تبديل',
     conflictWith: label => `مرتبط أيضا بـ “${label}”`,
     categories: {
       composer: 'المحرّر',
@@ -270,6 +273,7 @@ export const ar = defineLocale({
       'workspace.openFolder': 'فتح مجلد كمشروع',
       'composer.focus': 'التركيز على المحرّر',
       'composer.modelPicker': 'فتح منتقي النموذج',
+      'composer.dictate': 'إملاء في المحرّر',
       'composer.voice': 'بدء / إيقاف المحادثة الصوتية',
       'view.toggleSidebar': 'تبديل الشريط الجانبي للجلسات',
       'view.toggleRightSidebar': 'تبديل متصفح الملفات',
