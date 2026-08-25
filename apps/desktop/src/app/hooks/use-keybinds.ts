@@ -393,9 +393,17 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
       if (event.key === 'Escape' && dictateTargetRef.current && activeDictateGenerationRef.current !== null) {
         event.preventDefault()
         event.stopPropagation()
+        const target = dictateTargetRef.current
+        const generation = activeDictateGenerationRef.current
         heldDictateCodeRef.current = null
         toggleDictateActiveRef.current = false
-        requestComposerDictate('cancel', dictateTargetRef.current, activeDictateGenerationRef.current)
+        // Escape owns exactly one cancel gesture. Release the dispatcher pin
+        // synchronously so a second Escape can reach the composer (for
+        // example, to halt an in-flight agent run) without waiting for the
+        // recorder's deferred finished event.
+        activeDictateGenerationRef.current = null
+        dictateTargetRef.current = null
+        requestComposerDictate('cancel', target, generation)
 
         return
       }

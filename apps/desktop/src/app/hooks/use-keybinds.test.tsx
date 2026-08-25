@@ -10,6 +10,7 @@ import { $dictateMode, resetBinding, setBinding } from '@/store/keybinds'
 import { useKeybinds } from './use-keybinds'
 
 const deps = {
+  archiveSelectedSession: () => undefined,
   openNewSessionTab: () => undefined,
   startFreshSession: () => undefined,
   toggleCommandCenter: () => undefined,
