@@ -232,13 +232,12 @@ function TileChat({
     () =>
       gatewayOpen ? (
         <ModelMenuPanel
-          gateway={gateway || undefined}
           onSelectModel={selectModel}
-          profile={ownerRoute?.profile || activeGatewayProfile}
+          profile={ownerRoute?.targetProfile || ownerRoute?.profile || activeGatewayProfile}
           requestGateway={requestTileGateway}
         />
       ) : null,
-    [activeGatewayProfile, gateway, gatewayOpen, ownerRoute?.profile, requestTileGateway, selectModel]
+    [activeGatewayProfile, gatewayOpen, ownerRoute?.profile, ownerRoute?.targetProfile, requestTileGateway, selectModel]
   )
 
   return (
@@ -257,6 +256,7 @@ function TileChat({
           onDismissError={actions.dismissError}
           onEdit={actions.editMessage}
           onPasteClipboardImage={onPasteClipboardImage}
+          onPasteClipboardText={composer.pasteClipboardText}
           onPickFiles={onPickFiles}
           onPickFolders={onPickFolders}
           onPickImages={onPickImages}

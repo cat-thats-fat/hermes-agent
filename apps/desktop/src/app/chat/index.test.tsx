@@ -47,7 +47,7 @@ vi.mock('@/lib/model-options', () => ({
   requestModelOptions: vi.fn(async () => ({ models: [] }))
 }))
 vi.mock('./chat-drop-overlay', () => ({ ChatDropOverlay: () => null }))
-vi.mock('./chat-swap-overlay', () => ({ ChatSwapOverlay: () => null }))
+vi.mock('./chat-swap-overlay', () => ({ ChatSwapOverlay: () => null, ChatSyncBadge: () => null }))
 vi.mock('./composer', () => ({ ChatBar: () => null, ChatBarFallback: () => null }))
 vi.mock('./hooks/use-file-drop-zone', () => ({
   useFileDropZone: () => ({ dragKind: null, dropHandlers: {} })
@@ -118,6 +118,7 @@ describe('ChatView render isolation', () => {
       onDeleteSelectedSession: vi.fn(),
       onEdit: vi.fn(),
       onPasteClipboardImage: vi.fn(),
+      onPasteClipboardText: vi.fn(),
       onPickFiles: vi.fn(),
       onPickFolders: vi.fn(),
       onPickImages: vi.fn(),

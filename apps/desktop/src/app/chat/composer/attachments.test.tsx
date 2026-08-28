@@ -236,6 +236,15 @@ describe('AttachmentList', () => {
     )
   })
 
+  it('removes an attachment from the composer chip', async () => {
+    const onRemove = vi.fn()
+
+    await renderWithI18n(<AttachmentList attachments={[makeAttachment('a', 'doc.pdf')]} onRemove={onRemove} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove doc.pdf' }))
+    expect(onRemove).toHaveBeenCalledWith('a')
+  })
+
   it('still routes a non-image attachment to the preview rail', async () => {
     $previewTabs.set([])
 
@@ -249,5 +258,24 @@ describe('AttachmentList', () => {
 
     expect(screen.queryByRole('dialog')).toBeNull()
     expect($previewTabs.get().map(tab => tab.target.path)).toEqual(['/tmp/notes.md'])
+  })
+
+  it('preserves a local-origin file flag when opening the preview', async () => {
+    $previewTabs.set([])
+    const file: ComposerAttachment = {
+      id: 'clipboard',
+      kind: 'file',
+      label: 'clipboard.md',
+      localFile: true,
+      path: '/tmp/clipboard.md'
+    }
+
+    await renderWithI18n(<AttachmentList attachments={[file]} />)
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /clipboard\.md/ }))
+    })
+
+    expect($previewTabs.get()[0]?.target).toMatchObject({ localFile: true, path: '/tmp/clipboard.md' })
   })
 })
